@@ -197,34 +197,34 @@ def render_monitoring_tab(
     eye_model     = st.session_state["eye_models_rt"].get(eye_model_name)
     posture_model = st.session_state["posture_models_rt"].get(posture_model_name)
 
-    # ── Layout: live feed (left, narrower) | analysis panel (right) ───────────
-    feed_col, analysis_col = st.columns([3, 2])
+    # ── CSS: constrain the webrtc widget to 55% width so it stays left ───────
+    st.markdown(
+        """
+        <style>
+        /* Shrink the webrtc video container to ~55% of page width */
+        div[data-testid="stVerticalBlock"] > div:has(> iframe) {
+            max-width: 55% !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
-    with feed_col:
-        # Session timer above the feed
-        if "session_start" in st.session_state:
-            elapsed    = int(time.time() - st.session_state["session_start"])
-            mins, secs = divmod(elapsed, 60)
-            hrs,  mins = divmod(mins, 60)
-            timer_str  = (
-                f"{hrs:02d}:{mins:02d}:{secs:02d}" if hrs > 0
-                else f"{mins:02d}:{secs:02d}"
-            )
-            st.caption(f"Session duration: {timer_str}")
+    # ── webrtc_streamer MUST be called at the top level, not inside a column ──
+    # Calling it inside st.columns causes the double-box bug seen in the screenshot.
+    rtc_config = RTCConfiguration(_get_rtc_configuration())
 
-        rtc_config = RTCConfiguration(_get_rtc_configuration())
-
-        ctx = webrtc_streamer(
-            key="visionmate-live",
-            mode=WebRtcMode.SENDRECV,
-            rtc_configuration=rtc_config,
-            video_transformer_factory=VisionMateTransformer,
-            media_stream_constraints={
-                "video": {"width": {"ideal": 480}, "height": {"ideal": 360}},
-                "audio": False,
-            },
-            async_processing=True,
-        )
+    ctx = webrtc_streamer(
+        key="visionmate-live",
+        mode=WebRtcMode.SENDRECV,
+        rtc_configuration=rtc_config,
+        video_transformer_factory=VisionMateTransformer,
+        media_stream_constraints={
+            "video": {"width": {"ideal": 480}, "height": {"ideal": 360}},
+            "audio": False,
+        },
+        async_processing=True,
+    )
 
     # ── Inject models into the running transformer ─────────────────────────────
     if ctx.video_transformer:
@@ -235,6 +235,20 @@ def render_monitoring_tab(
         t.eye_model_name     = eye_model_name
         t.posture_model      = posture_model
         t.posture_model_name = posture_model_name
+
+    # ── Two-column layout: left = session info, right = live analysis ──────────
+    feed_col, analysis_col = st.columns([3, 2])
+
+    with feed_col:
+        if "session_start" in st.session_state:
+            elapsed    = int(time.time() - st.session_state["session_start"])
+            mins, secs = divmod(elapsed, 60)
+            hrs,  mins = divmod(mins, 60)
+            timer_str  = (
+                f"{hrs:02d}:{mins:02d}:{secs:02d}" if hrs > 0
+                else f"{mins:02d}:{secs:02d}"
+            )
+            st.caption(f"Session duration: {timer_str}")
 
     with analysis_col:
         result = ctx.video_transformer.get_result() if ctx.video_transformer else FrameResult()

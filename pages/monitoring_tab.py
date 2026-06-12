@@ -20,9 +20,9 @@ from utils.voice_guidance import voice_guidance
 from database.db_manager import save_health_metric
 
 
-# ── ICE server config — pure WebRTC with public STUN + free TURN ───────────────
-# No Twilio. Uses Google STUN + Open Relay free TURN which works on
-# Streamlit Cloud, Render, and most cloud platforms without any API keys.
+# ── ICE server config — Streamlit with Metered TURN Server (Secrets) ──────────
+# Dynamically loaded via st.secrets for local security (Option A).
+# Reads host, username, and credential parameters from your .streamlit/secrets.toml file.
 RTC_CONFIGURATION = {
     "iceServers": [
         {"urls": "stun:stun.l.google.com:19302"},
@@ -30,21 +30,24 @@ RTC_CONFIGURATION = {
         {"urls": "stun:stun2.l.google.com:19302"},
         {"urls": "stun:stun3.l.google.com:19302"},
         {"urls": "stun:stun4.l.google.com:19302"},
+        # Metered TURN Standard (UDP)
         {
-            "urls": "turn:a.relay.metered.ca:80",
-            "username": "openrelayproject",
-            "credential": "openrelayproject",
+            "urls": f"turn:{st.secrets['metered']['host']}:3478",
+            "username": st.secrets["metered"]["username"],
+            "credential": st.secrets["metered"]["credential"],
         },
+        # Metered TURN Standard (TCP)
         {
-            "urls": "turn:a.relay.metered.ca:443",
-            "username": "openrelayproject",
-            "credential": "openrelayproject",
+            "urls": f"turn:{st.secrets['metered']['host']}:3478?transport=tcp",
+            "username": st.secrets["metered"]["username"],
+            "credential": st.secrets["metered"]["credential"],
         },
+        # Metered TURN Over TLS (Port 443 - essential for strict firewalls)
         {
-            "urls": "turn:a.relay.metered.ca:443?transport=tcp",
-            "username": "openrelayproject",
-            "credential": "openrelayproject",
-        },
+            "urls": f"turns:{st.secrets['metered']['host']}:443?transport=tcp",
+            "username": st.secrets["metered"]["username"],
+            "credential": st.secrets["metered"]["credential"],
+        }
     ]
 }
 

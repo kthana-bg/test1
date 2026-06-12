@@ -1,4 +1,6 @@
-import os, sys, json
+import os
+import sys
+import json
 import numpy as np
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -26,7 +28,7 @@ RESULTS_PATHS = {
     "EfficientNetB0":              os.path.join(RESULTS_DIR, "efficientnetb0_results.json"),
     "Custom LSTM/DNN":             os.path.join(RESULTS_DIR, "custom_lstm_results.json"),
     "MediaPipe Pose (Rule-Based)": os.path.join(RESULTS_DIR, "mediapipe_results.json"),
-    "YOLOv8-Pose / MoveNet DNN":  os.path.join(RESULTS_DIR, "yolo_movenet_results.json"),
+    "YOLOv8-Pose / MoveNet DNN":   os.path.join(RESULTS_DIR, "yolo_movenet_results.json"),
 }
 
 # Placeholder values shown when real results JSON is missing
@@ -36,7 +38,7 @@ _DEMO_RESULTS = {
     "EfficientNetB0":              {"accuracy": 0.94, "f1_score": 0.93, "latency_ms": 15.2},
     "Custom LSTM/DNN":             {"accuracy": 0.85, "f1_score": 0.84, "latency_ms": 5.1},
     "MediaPipe Pose (Rule-Based)": {"accuracy": 0.82, "f1_score": 0.81, "latency_ms": 2.4},
-    "YOLOv8-Pose / MoveNet DNN":  {"accuracy": 0.92, "f1_score": 0.91, "latency_ms": 18.6},
+    "YOLOv8-Pose / MoveNet DNN":   {"accuracy": 0.92, "f1_score": 0.91, "latency_ms": 18.6},
 }
 
 
@@ -73,17 +75,18 @@ def load_keras_model(model_path: str):
         import tensorflow as tf
         from tensorflow import keras
 
-        # Patch InputLayer to accept and ignore unknown kwargs
-        original_init = tf.keras.layers.InputLayer.__init__
-        def patched_init(self, *args, **kwargs):
-            kwargs.pop("batch_shape", None)
-            kwargs.pop("optional", None)
-            original_init(self, *args, **kwargs)
+        # Define an explicit wrapper class that eats Keras 3 custom parameters safely
+        class PatchedInputLayer(tf.keras.layers.InputLayer):
+            def __init__(self, *args, **kwargs):
+                kwargs.pop("batch_shape", None)
+                kwargs.pop("optional", None)
+                super().__init__(*args, **kwargs)
 
         custom_objects = {
-            "InputLayer": tf.keras.layers.InputLayer,
-            "TrueDivide":  tf.math.truediv,
+            "InputLayer": PatchedInputLayer,
+            "TrueDivide": tf.math.truediv,
         }
+        
         with keras.utils.custom_object_scope(custom_objects):
             model = keras.models.load_model(model_path, compile=False)
         print(f"Loaded (custom_object_scope): {os.path.basename(model_path)}")

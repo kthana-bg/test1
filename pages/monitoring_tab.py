@@ -20,9 +20,15 @@ from utils.voice_guidance import voice_guidance
 from database.db_manager import save_health_metric
 
 
-# ── ICE server config — Streamlit with Metered TURN Server (Secrets) ──────────
-# Dynamically loaded via st.secrets for local security (Option A).
-# Reads host, username, and credential parameters from your .streamlit/secrets.toml file.
+# ── ICE server config — Fixed for Metered Port 443 ───────────────────────────
+# Pulls clean credentials from st.secrets. 
+try:
+    METERED_USER = st.secrets["metered"]["username"].strip()
+    METERED_CRED = st.secrets["metered"]["credential"].strip()
+except Exception as e:
+    st.error(f"Missing or misconfigured Streamlit Secrets: {e}")
+    METERED_USER, METERED_CRED = "", ""
+
 RTC_CONFIGURATION = {
     "iceServers": [
         {"urls": "stun:stun.l.google.com:19302"},
@@ -30,23 +36,12 @@ RTC_CONFIGURATION = {
         {"urls": "stun:stun2.l.google.com:19302"},
         {"urls": "stun:stun3.l.google.com:19302"},
         {"urls": "stun:stun4.l.google.com:19302"},
-        # Metered TURN Standard (UDP)
+        # FIXED: Changed prefix from 'turn:' to 'turns:' and appended transport parameter
+        # This allows WebRTC to successfully parse your Metered port 443 server.
         {
-            "urls": f"turn:{st.secrets['metered']['host']}:3478",
-            "username": st.secrets["metered"]["username"],
-            "credential": st.secrets["metered"]["credential"],
-        },
-        # Metered TURN Standard (TCP)
-        {
-            "urls": f"turn:{st.secrets['metered']['host']}:3478?transport=tcp",
-            "username": st.secrets["metered"]["username"],
-            "credential": st.secrets["metered"]["credential"],
-        },
-        # Metered TURN Over TLS (Port 443 - essential for strict firewalls)
-        {
-            "urls": f"turns:{st.secrets['metered']['host']}:443?transport=tcp",
-            "username": st.secrets["metered"]["username"],
-            "credential": st.secrets["metered"]["credential"],
+            "urls": "turns:global.relay.metered.ca:443?transport=tcp",
+            "username": METERED_USER,
+            "credential": METERED_CRED,
         }
     ]
 }

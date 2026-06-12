@@ -169,11 +169,17 @@ def render_monitoring_tab(
             st.session_state["mp_landmarkers"] = load_mediapipe_landmarkers()
     face_lm, pose_lm = st.session_state["mp_landmarkers"]
 
-    # ── Load AI models ONCE via app-level cache_resource ──────────────────────
-    # We call the same cached function from app.py — no second disk read.
-    # This guarantees eye_model / posture_model are the real loaded objects.
-    from app import _load_models_cached
-    eye_models, posture_models = _load_models_cached()
+    # ── Load AI models ONCE — cached in session_state on first load only ────────
+    # Do NOT import from app.py — importing it triggers st.set_page_config()
+    # a second time which crashes Streamlit. Use session_state as the cache.
+    if "vm_eye_models" not in st.session_state or "vm_posture_models" not in st.session_state:
+        from utils.model_loader import load_all_eye_models, load_all_posture_models
+        with st.spinner("Loading AI models…"):
+            st.session_state["vm_eye_models"]     = load_all_eye_models()
+            st.session_state["vm_posture_models"] = load_all_posture_models()
+
+    eye_models     = st.session_state["vm_eye_models"]
+    posture_models = st.session_state["vm_posture_models"]
 
     eye_model     = eye_models.get(eye_model_name)
     posture_model = posture_models.get(posture_model_name)

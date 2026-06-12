@@ -10,6 +10,7 @@ if _ROOT not in sys.path:
 MODELS_DIR  = os.path.join(_ROOT, "models")
 RESULTS_DIR = os.path.join(_ROOT, "results")
 
+# Paths unchanged
 EYE_MODEL_PATHS = {
     "Custom CNN":     os.path.join(MODELS_DIR, "eye_strain", "custom_cnn.h5"),
     "MobileNetV2":    os.path.join(MODELS_DIR, "eye_strain", "mobilenetv2.h5"),
@@ -18,7 +19,7 @@ EYE_MODEL_PATHS = {
 
 POSTURE_MODEL_PATHS = {
     "Custom LSTM/DNN":           os.path.join(MODELS_DIR, "posture", "custom_lstm.h5"),
-    "MediaPipe Pose (Rule-Based)": None,   # no model file — pure geometry
+    "MediaPipe Pose (Rule-Based)": None,
     "YOLOv8-Pose / MoveNet DNN": os.path.join(MODELS_DIR, "posture", "yolo_movenet_dnn.h5"),
 }
 
@@ -31,7 +32,6 @@ RESULTS_PATHS = {
     "YOLOv8-Pose / MoveNet DNN":   os.path.join(RESULTS_DIR, "yolo_movenet_results.json"),
 }
 
-# Placeholder values shown when real results JSON is missing
 _DEMO_RESULTS = {
     "Custom CNN":                  {"accuracy": 0.87, "f1_score": 0.86, "latency_ms": 12.3},
     "MobileNetV2":                 {"accuracy": 0.91, "f1_score": 0.90, "latency_ms": 8.7},
@@ -41,76 +41,62 @@ _DEMO_RESULTS = {
     "YOLOv8-Pose / MoveNet DNN":   {"accuracy": 0.92, "f1_score": 0.91, "latency_ms": 18.6},
 }
 
-
 def load_keras_model(model_path: str):
-    """
-      1. tf_keras  — preserves TF 2.15 layer behaviour (best for .h5 files)
-      2. keras compile=False — skips optimizer incompatibilities
-      3. custom_object_scope — patches TrueDivide and batch_shape issues
-    """
     if not model_path or not os.path.exists(model_path):
         print(f"Model file not found: {model_path}")
         return None
 
-    # Strategy 1: tf_keras (legacy Keras — matches Kaggle training environment)
-    try:
-        import tf_keras
-        model = tf_keras.models.load_model(model_path, compile=False)
-        print(f"Loaded (tf_keras): {os.path.basename(model_path)}")
-        return model
-    except Exception as e1:
-        print(f"tf_keras failed for {os.path.basename(model_path)}: {e1}")
-
-    # Strategy 2: standard keras with compile=False
+    # Strategy 1: Attempt standard clean load first
     try:
         from tensorflow import keras
         model = keras.models.load_model(model_path, compile=False)
-        print(f"Loaded (keras compile=False): {os.path.basename(model_path)}")
+        print(f"Loaded (Standard): {os.path.basename(model_path)}")
         return model
-    except Exception as e2:
-        print(f"keras compile=False failed: {e2}")
+    except Exception:
+        pass
 
-    # Strategy 3: custom_object_scope for TrueDivide + InputLayer compat
+    # Strategy 2: Ultra Fallback for legacy environment parsing Keras 3 files
     try:
         import tensorflow as tf
         from tensorflow import keras
-
-        # Define an explicit wrapper class that eats Keras 3 custom parameters safely
-        class PatchedInputLayer(tf.keras.layers.InputLayer):
-            def __init__(self, *args, **kwargs):
-                kwargs.pop("batch_shape", None)
-                kwargs.pop("optional", None)
-                super().__init__(*args, **kwargs)
-
-        custom_objects = {
-            "InputLayer": PatchedInputLayer,
-            "TrueDivide": tf.math.truediv,
-        }
         
-        with keras.utils.custom_object_scope(custom_objects):
-            model = keras.models.load_model(model_path, compile=False)
-        print(f"Loaded (custom_object_scope): {os.path.basename(model_path)}")
+        # Intercept and scrub dictionary configs globally on deserialization
+        from tensorflow.python.keras.layers import deserialize as deserialize_layer
+        
+        original_deserialize = deserialize_layer
+        
+        def scrubbed_deserialize(config, custom_objects=None):
+            if isinstance(config, dict) and "config" in config:
+                inner_cfg = config["config"]
+                if isinstance(inner_cfg, dict):
+                    # Strip Keras 3 specific properties
+                    inner_cfg.pop("batch_shape", None)
+                    inner_cfg.pop("optional", None)
+                    inner_cfg.pop("quantization_config", None)
+                    if "dtype" in inner_cfg and isinstance(inner_cfg["dtype"], dict):
+                        inner_cfg["dtype"] = inner_cfg["dtype"].get("config", {}).get("name", "float32")
+            return original_deserialize(config, custom_objects)
+            
+        # Temporarily inject the structural scrubbing monkey-patch
+        import tensorflow.python.keras.layers as legacy_layers
+        legacy_layers.deserialize = scrubbed_deserialize
+        
+        model = keras.models.load_model(model_path, compile=False)
+        
+        # Restore normal state
+        legacy_layers.deserialize = original_deserialize
+        print(f"Loaded via config scrubbing: {os.path.basename(model_path)}")
         return model
-    except Exception as e3:
-        print(f"custom_object_scope failed: {e3}")
-
-    print(f"All strategies failed for: {model_path}")
+    except Exception as final_err:
+        print(f"All loading approaches failed for {os.path.basename(model_path)}: {final_err}")
+        
     return None
 
-
 def load_all_eye_models() -> dict:
-    models = {}
-    for name, path in EYE_MODEL_PATHS.items():
-        models[name] = load_keras_model(path)
-    return models
-
+    return {name: load_keras_model(path) for name, path in EYE_MODEL_PATHS.items()}
 
 def load_all_posture_models() -> dict:
-    models = {}
-    for name, path in POSTURE_MODEL_PATHS.items():
-        models[name] = load_keras_model(path) if path else None
-    return models
-
+    return {name: (load_keras_model(path) if path else None) for name, path in POSTURE_MODEL_PATHS.items()}
 
 def load_results(model_name: str) -> dict:
     path = RESULTS_PATHS.get(model_name)
@@ -118,7 +104,6 @@ def load_results(model_name: str) -> dict:
         with open(path, "r") as f:
             return json.load(f)
     return _DEMO_RESULTS.get(model_name, {"accuracy": 0.80, "f1_score": 0.79, "latency_ms": 10.0})
-
 
 def load_all_results() -> dict:
     return {name: load_results(name) for name in RESULTS_PATHS}

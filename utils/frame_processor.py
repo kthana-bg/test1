@@ -1,9 +1,5 @@
 """
 Frame processor for VisionMate.
-Provides:
-  - process_frame()          : run face/pose landmarkers + AI model inference on one BGR frame
-  - VisionMateTransformer    : streamlit-webrtc VideoTransformerBase subclass
-  - load_mediapipe_landmarkers(): download + initialise MediaPipe task models
 """
 
 import threading
@@ -47,11 +43,8 @@ POSE_MODEL_URL = (
 )
 
 
-# ── Data container ─────────────────────────────────────────────────────────────
-
 @dataclass
 class FrameResult:
-    """Holds the output of one processed frame."""
     frame_bgr:          Optional[np.ndarray] = None
     eye_status:         str   = "Unknown"
     ear_value:          float = 0.0
@@ -75,8 +68,6 @@ def compute_health_score(eye_status: str, posture_status: str) -> float:
     return eye_score + posture_score
 
 
-# ── MediaPipe loader ───────────────────────────────────────────────────────────
-
 def _download_model(url: str, dest_path: str) -> bool:
     if os.path.exists(dest_path):
         return True
@@ -85,7 +76,6 @@ def _download_model(url: str, dest_path: str) -> bool:
         import urllib.request
         print(f"Downloading {os.path.basename(dest_path)} ...")
         urllib.request.urlretrieve(url, dest_path)
-        print(f"Downloaded: {dest_path}")
         return True
     except Exception as e:
         print(f"Model download failed: {e}")
@@ -93,7 +83,6 @@ def _download_model(url: str, dest_path: str) -> bool:
 
 
 def load_mediapipe_landmarkers():
-    """Download (if needed) and initialise MediaPipe FaceLandmarker and PoseLandmarker."""
     face_lm = None
     pose_lm = None
     try:
@@ -134,22 +123,12 @@ def load_mediapipe_landmarkers():
     return face_lm, pose_lm
 
 
-# ── Core frame processing ──────────────────────────────────────────────────────
-
 def process_frame(
-    frame_bgr: np.ndarray,
-    face_landmarker,
-    pose_landmarker,
-    eye_model,
-    eye_model_name: str,
-    posture_model,
-    posture_model_name: str,
-    ear_consec_counter: int,
-) -> tuple:
-    """
-    Run detection + inference on a single BGR frame.
-    Returns (FrameResult, updated_ear_consec_counter).
-    """
+    frame_bgr, face_landmarker, pose_landmarker,
+    eye_model, eye_model_name,
+    posture_model, posture_model_name,
+    ear_consec_counter,
+):
     import mediapipe as mp
 
     result           = FrameResult()
@@ -182,18 +161,16 @@ def process_frame(
                 left_eye, right_eye = extract_eye_landmarks(proxy, w, h)
                 ear_val = (calculate_ear(left_eye) + calculate_ear(right_eye)) / 2.0
 
-                # EAR rule gives a fallback status; model overrides when loaded
+                # ── Always compute EAR as fallback ─────────────────────────────
                 eye_status, ear_consec_counter = classify_eye_status_by_ear(
                     ear_val, ear_consec_counter
                 )
 
-                # Use trained model when available (takes priority over EAR rules)
-                use_model = (
-                    eye_model is not None
-                    and "Rule"      not in eye_model_name
-                    and "MediaPipe" not in eye_model_name
-                )
-                if use_model:
+                # ── Use trained CNN model if loaded — overrides EAR rule ───────
+                # eye_model_name "Custom CNN" / "MobileNetV2" / "EfficientNetB0"
+                # all pass the check below. Only the MediaPipe rule-based option
+                # is excluded by the string check.
+                if eye_model is not None and "Rule" not in eye_model_name and "MediaPipe" not in eye_model_name:
                     roi = get_eye_roi(frame_bgr, left_eye)
                     if roi is not None:
                         try:
@@ -201,8 +178,11 @@ def process_frame(
                             eye_status = inf["label"]
                             eye_conf   = inf["confidence"]
                             eye_lat    = inf["latency_ms"]
+                            print(f"[EYE MODEL] {eye_model_name} → {eye_status} ({eye_conf:.2f})")
                         except Exception as me:
-                            print(f"Eye model inference error: {me}")
+                            print(f"[EYE MODEL ERROR] {me} — falling back to EAR")
+                else:
+                    print(f"[EYE] eye_model is None={eye_model is None}, name={eye_model_name} — using EAR fallback")
 
                 draw_eye_landmarks(frame_bgr, left_eye, right_eye)
 
@@ -242,28 +222,25 @@ def process_frame(
                 posture_angle  = calculate_neck_tilt_angle(ear_mid, shoulder_mid)
                 posture_status = classify_posture_by_angle(posture_angle)
 
-                # Use trained model when available (takes priority over angle rules)
-                use_model = (
-                    posture_model is not None
-                    and "Rule"      not in posture_model_name
-                    and "MediaPipe" not in posture_model_name
-                )
-                if use_model:
+                # ── Use trained LSTM model if loaded — overrides angle rule ────
+                if posture_model is not None and "Rule" not in posture_model_name and "MediaPipe" not in posture_model_name:
                     try:
                         feat_vec       = extract_landmark_feature_vector(lm_dict)
                         inf            = run_posture_model_inference(posture_model, feat_vec, posture_model_name)
                         posture_status = inf["label"]
                         posture_conf   = inf["confidence"]
                         posture_lat    = inf["latency_ms"]
+                        print(f"[POSTURE MODEL] {posture_model_name} → {posture_status} ({posture_conf:.2f})")
                     except Exception as me:
-                        print(f"Posture model inference error: {me}")
+                        print(f"[POSTURE MODEL ERROR] {me} — falling back to angle rule")
+                else:
+                    print(f"[POSTURE] posture_model is None={posture_model is None}, name={posture_model_name} — using angle fallback")
 
                 draw_posture_overlay(frame_bgr, lm_dict, posture_angle, posture_status)
 
         except Exception as e:
             print(f"Pose detection error: {e}")
 
-    # ── Overlay text ───────────────────────────────────────────────────────────
     health_score  = compute_health_score(eye_status, posture_status)
     eye_color     = (0, 255, 0) if eye_status     == "Normal" else (0, 0, 255)
     posture_color = (0, 255, 0) if posture_status == "Good"   else (0, 0, 255)
@@ -299,21 +276,16 @@ try:
     import av
 
     class VisionMateTransformer(VideoTransformerBase):
-        """
-        Called by streamlit-webrtc for every frame received from the browser.
-        Runs inference on every FRAME_SKIP-th frame and returns the annotated frame.
-        Stores the latest FrameResult in self._result for the metrics panel.
-        """
-
-        FRAME_SKIP = 3  # process every 3rd frame to keep latency low
+        FRAME_SKIP = 3
 
         def __init__(self):
-            self._result      = FrameResult()
-            self._lock        = threading.Lock()
-            self._ear_consec  = 0
-            self._frame_count = 0
+            self._result        = FrameResult()
+            self._lock          = threading.Lock()
+            self._ear_consec    = 0
+            self._frame_count   = 0
 
-            # Injected from monitoring_tab after construction
+            # These are set by monitoring_tab via update_models()
+            # They are stored here permanently — NOT injected per-rerun
             self.face_landmarker    = None
             self.pose_landmarker    = None
             self.eye_model          = None
@@ -321,9 +293,27 @@ try:
             self.posture_model      = None
             self.posture_model_name = "Custom LSTM/DNN"
 
+            # Flag: True once models have been loaded at least once
+            self._models_ready = False
+
+        def update_models(self, face_lm, pose_lm, eye_model, eye_model_name, posture_model, posture_model_name):
+            """
+            Called from monitoring_tab on every Streamlit rerun.
+            Uses a lock so recv() never reads a half-updated state.
+            """
+            with self._lock:
+                self.face_landmarker    = face_lm
+                self.pose_landmarker    = pose_lm
+                self.eye_model          = eye_model
+                self.eye_model_name     = eye_model_name
+                self.posture_model      = posture_model
+                self.posture_model_name = posture_model_name
+                self._models_ready      = (eye_model is not None and posture_model is not None)
+                print(f"[TRANSFORMER] Models updated — eye={eye_model_name} loaded={eye_model is not None}, posture={posture_model_name} loaded={posture_model is not None}")
+
         def recv(self, frame: "av.VideoFrame") -> "av.VideoFrame":
             img_bgr = frame.to_ndarray(format="bgr24")
-            img_bgr = cv2.flip(img_bgr, 1)  # mirror so it feels natural
+            img_bgr = cv2.flip(img_bgr, 1)
 
             self._frame_count += 1
 
@@ -346,13 +336,12 @@ try:
                 )
 
                 with self._lock:
-                    self._result    = fr
+                    self._result     = fr
                     self._ear_consec = new_ear_consec
 
                 img_bgr = fr.frame_bgr if fr.frame_bgr is not None else img_bgr
 
             else:
-                # On skipped frames, re-draw last known status text quickly
                 with self._lock:
                     last = self._result
                 eye_color     = (0, 255, 0) if last.eye_status     == "Normal" else (0, 0, 255)

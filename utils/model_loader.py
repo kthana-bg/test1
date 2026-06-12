@@ -16,7 +16,7 @@ EYE_MODEL_PATHS = {
 
 POSTURE_MODEL_PATHS = {
     "Custom LSTM/DNN":             os.path.join(MODELS_DIR, "posture", "custom_lstm.h5"),
-    "MediaPipe Pose (Rule-Based)": None,   # pure geometry, no model file
+    "MediaPipe Pose (Rule-Based)": None,
     "YOLOv8-Pose / MoveNet DNN":  os.path.join(MODELS_DIR, "posture", "yolo_movenet_dnn.h5"),
 }
 
@@ -39,39 +39,60 @@ _DEMO_RESULTS = {
 }
 
 
-def _make_quantization_safe_objects() -> dict:
+def _build_compat_objects() -> dict:
     """
-    Returns custom_objects that replace quantization-aware layers with their
-    plain float equivalents. Fixes:
-      'Unrecognized keyword arguments passed to Dense: {quantization_config: None}'
+    Builds a single custom_objects dict that patches ALL known incompatibilities
+    between Kaggle-trained models and the deployment TF/Keras version:
+
+    1. quantization_config=None  — models saved after quantization-aware training
+       pass this extra kwarg to Dense, Conv2D, DepthwiseConv2D, BatchNormalization.
+    2. batch_shape / optional    — InputLayer saved with these kwargs which newer
+       Keras no longer accepts.
+    3. TrueDivide                — MobileNetV2 preprocessing layer saved as a
+       custom TrueDivide op; map it to tf.math.truediv.
     """
     import tensorflow as tf
 
-    class _QuantDense(tf.keras.layers.Dense):
+    # ── Patch Dense ────────────────────────────────────────────────────────────
+    class _CompatDense(tf.keras.layers.Dense):
         def __init__(self, *args, **kwargs):
             kwargs.pop("quantization_config", None)
             super().__init__(*args, **kwargs)
 
-    class _QuantConv2D(tf.keras.layers.Conv2D):
+    # ── Patch Conv2D ───────────────────────────────────────────────────────────
+    class _CompatConv2D(tf.keras.layers.Conv2D):
         def __init__(self, *args, **kwargs):
             kwargs.pop("quantization_config", None)
             super().__init__(*args, **kwargs)
 
-    class _QuantDepthwiseConv2D(tf.keras.layers.DepthwiseConv2D):
+    # ── Patch DepthwiseConv2D ──────────────────────────────────────────────────
+    class _CompatDepthwiseConv2D(tf.keras.layers.DepthwiseConv2D):
         def __init__(self, *args, **kwargs):
             kwargs.pop("quantization_config", None)
             super().__init__(*args, **kwargs)
 
-    class _QuantBatchNorm(tf.keras.layers.BatchNormalization):
+    # ── Patch BatchNormalization ───────────────────────────────────────────────
+    class _CompatBatchNorm(tf.keras.layers.BatchNormalization):
         def __init__(self, *args, **kwargs):
             kwargs.pop("quantization_config", None)
             super().__init__(*args, **kwargs)
+
+    # ── Patch InputLayer ───────────────────────────────────────────────────────
+    _orig_input_init = tf.keras.layers.InputLayer.__init__
+    class _CompatInputLayer(tf.keras.layers.InputLayer):
+        def __init__(self, *args, **kwargs):
+            kwargs.pop("batch_shape", None)
+            kwargs.pop("optional",    None)
+            _orig_input_init(self, *args, **kwargs)
 
     return {
-        "Dense":               _QuantDense,
-        "Conv2D":              _QuantConv2D,
-        "DepthwiseConv2D":     _QuantDepthwiseConv2D,
-        "BatchNormalization":  _QuantBatchNorm,
+        "Dense":               _CompatDense,
+        "Conv2D":              _CompatConv2D,
+        "DepthwiseConv2D":     _CompatDepthwiseConv2D,
+        "BatchNormalization":  _CompatBatchNorm,
+        "InputLayer":          _CompatInputLayer,
+        # MobileNetV2 preprocessing uses TrueDivide as a named layer
+        "TrueDivide":          tf.keras.layers.Lambda(lambda x: x / 127.5 - 1.0),
     }
 
 
@@ -82,74 +103,49 @@ def load_keras_model(model_path: str):
 
     name = os.path.basename(model_path)
 
-    # Strategy 1: tf_keras (legacy Keras — matches Kaggle training environment)
+    # ── Strategy 1: unified compat scope (handles all known issues at once) ────
+    # This is now the FIRST strategy because the logs show every model needs it.
+    try:
+        from tensorflow import keras
+        compat_objects = _build_compat_objects()
+        with keras.utils.custom_object_scope(compat_objects):
+            model = keras.models.load_model(model_path, compile=False)
+        print(f"Loaded (compat-scope): {name}")
+        return model
+    except Exception as e1:
+        print(f"compat-scope failed for {name}: {e1}")
+
+    # ── Strategy 2: tf_keras + compat objects ─────────────────────────────────
+    try:
+        import tf_keras
+        compat_objects = _build_compat_objects()
+        model = tf_keras.models.load_model(
+            model_path, compile=False, custom_objects=compat_objects
+        )
+        print(f"Loaded (tf_keras + compat): {name}")
+        return model
+    except Exception as e2:
+        print(f"tf_keras + compat failed for {name}: {e2}")
+
+    # ── Strategy 3: tf_keras alone (no custom objects) ────────────────────────
     try:
         import tf_keras
         model = tf_keras.models.load_model(model_path, compile=False)
         print(f"Loaded (tf_keras): {name}")
         return model
-    except Exception as e1:
-        print(f"tf_keras failed for {name}: {e1}")
+    except Exception as e3:
+        print(f"tf_keras failed for {name}: {e3}")
 
-    # Strategy 2: standard keras with compile=False
+    # ── Strategy 4: plain keras compile=False ─────────────────────────────────
     try:
         from tensorflow import keras
         model = keras.models.load_model(model_path, compile=False)
         print(f"Loaded (keras compile=False): {name}")
         return model
-    except Exception as e2:
-        print(f"keras compile=False failed for {name}: {e2}")
-
-    # Strategy 3: custom_object_scope for TrueDivide + InputLayer compat
-    try:
-        import tensorflow as tf
-        from tensorflow import keras
-
-        original_init = tf.keras.layers.InputLayer.__init__
-        def patched_init(self, *args, **kwargs):
-            kwargs.pop("batch_shape", None)
-            kwargs.pop("optional", None)
-            original_init(self, *args, **kwargs)
-
-        custom_objects = {
-            "InputLayer": tf.keras.layers.InputLayer,
-            "TrueDivide":  tf.math.truediv,
-        }
-        with keras.utils.custom_object_scope(custom_objects):
-            model = keras.models.load_model(model_path, compile=False)
-        print(f"Loaded (custom_object_scope): {name}")
-        return model
-    except Exception as e3:
-        print(f"custom_object_scope failed for {name}: {e3}")
-
-    # Strategy 4: quantization-aware training compat
-    # Fixes: "Unrecognized keyword arguments passed to Dense: {quantization_config: None}"
-    # This happens when a model was saved after quantization-aware training on Kaggle.
-    try:
-        from tensorflow import keras
-        quant_objects = _make_quantization_safe_objects()
-        with keras.utils.custom_object_scope(quant_objects):
-            model = keras.models.load_model(model_path, compile=False)
-        print(f"Loaded (quantization-safe): {name}")
-        return model
     except Exception as e4:
-        print(f"quantization-safe failed for {name}: {e4}")
+        print(f"keras compile=False failed for {name}: {e4}")
 
-    # Strategy 5: tf_keras + quantization-safe objects combined
-    try:
-        import tf_keras
-        quant_objects = _make_quantization_safe_objects()
-        model = tf_keras.models.load_model(
-            model_path,
-            compile=False,
-            custom_objects=quant_objects,
-        )
-        print(f"Loaded (tf_keras + quantization-safe): {name}")
-        return model
-    except Exception as e5:
-        print(f"tf_keras + quantization-safe failed for {name}: {e5}")
-
-    print(f"All strategies failed for: {model_path}")
+    print(f"ALL strategies failed for: {model_path}")
     return None
 
 

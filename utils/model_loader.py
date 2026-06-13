@@ -1,5 +1,4 @@
 import os, sys, json
-import numpy as np
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
@@ -39,51 +38,49 @@ _DEMO_RESULTS = {
 }
 
 
-def _build_compat_objects() -> dict:
+def _build_compat_objects():
     """
-    Builds a single custom_objects dict that patches ALL known incompatibilities
-    between Kaggle-trained models and the deployment TF/Keras version:
-
-    1. quantization_config=None  — models saved after quantization-aware training
-       pass this extra kwarg to Dense, Conv2D, DepthwiseConv2D, BatchNormalization.
-    2. batch_shape / optional    — InputLayer saved with these kwargs which newer
-       Keras no longer accepts.
-    3. TrueDivide                — MobileNetV2 preprocessing layer saved as a
-       custom TrueDivide op; map it to tf.math.truediv.
+    Single custom_objects dict that fixes ALL known issues:
+      1. quantization_config=None  on Dense / Conv2D / DepthwiseConv2D / BatchNorm
+      2. batch_shape + optional    on InputLayer  →  convert batch_shape to shape
+      3. TrueDivide                on MobileNetV2 →  map to a Lambda layer
     """
     import tensorflow as tf
 
-    # ── Patch Dense ────────────────────────────────────────────────────────────
     class _CompatDense(tf.keras.layers.Dense):
         def __init__(self, *args, **kwargs):
             kwargs.pop("quantization_config", None)
             super().__init__(*args, **kwargs)
 
-    # ── Patch Conv2D ───────────────────────────────────────────────────────────
     class _CompatConv2D(tf.keras.layers.Conv2D):
         def __init__(self, *args, **kwargs):
             kwargs.pop("quantization_config", None)
             super().__init__(*args, **kwargs)
 
-    # ── Patch DepthwiseConv2D ──────────────────────────────────────────────────
     class _CompatDepthwiseConv2D(tf.keras.layers.DepthwiseConv2D):
         def __init__(self, *args, **kwargs):
             kwargs.pop("quantization_config", None)
             super().__init__(*args, **kwargs)
 
-    # ── Patch BatchNormalization ───────────────────────────────────────────────
     class _CompatBatchNorm(tf.keras.layers.BatchNormalization):
         def __init__(self, *args, **kwargs):
             kwargs.pop("quantization_config", None)
             super().__init__(*args, **kwargs)
 
-    # ── Patch InputLayer ───────────────────────────────────────────────────────
-    _orig_input_init = tf.keras.layers.InputLayer.__init__
     class _CompatInputLayer(tf.keras.layers.InputLayer):
         def __init__(self, *args, **kwargs):
-            kwargs.pop("batch_shape", None)
-            kwargs.pop("optional",    None)
-            _orig_input_init(self, *args, **kwargs)
+            # batch_shape=[None, 32, 64, 3]  →  shape=(32, 64, 3)
+            batch_shape = kwargs.pop("batch_shape", None)
+            kwargs.pop("optional", None)
+            if batch_shape is not None and "shape" not in kwargs:
+                # strip the leading batch dimension
+                kwargs["shape"] = tuple(batch_shape[1:])
+            super().__init__(*args, **kwargs)
+
+    # MobileNetV2 serialises its /127.5-1 preprocessing as a TrueDivide layer
+    class _TrueDivide(tf.keras.layers.Layer):
+        def call(self, inputs):
+            return tf.math.truediv(inputs, 127.5) - 1.0
 
     return {
         "Dense":               _CompatDense,
@@ -91,8 +88,7 @@ def _build_compat_objects() -> dict:
         "DepthwiseConv2D":     _CompatDepthwiseConv2D,
         "BatchNormalization":  _CompatBatchNorm,
         "InputLayer":          _CompatInputLayer,
-        # MobileNetV2 preprocessing uses TrueDivide as a named layer
-        "TrueDivide":          tf.keras.layers.Lambda(lambda x: x / 127.5 - 1.0),
+        "TrueDivide":          _TrueDivide,
     }
 
 
@@ -103,31 +99,28 @@ def load_keras_model(model_path: str):
 
     name = os.path.basename(model_path)
 
-    # ── Strategy 1: unified compat scope (handles all known issues at once) ────
-    # This is now the FIRST strategy because the logs show every model needs it.
+    # Strategy 1: keras + full compat objects  (fixes all 3 issues at once)
     try:
         from tensorflow import keras
-        compat_objects = _build_compat_objects()
-        with keras.utils.custom_object_scope(compat_objects):
+        with keras.utils.custom_object_scope(_build_compat_objects()):
             model = keras.models.load_model(model_path, compile=False)
         print(f"Loaded (compat-scope): {name}")
         return model
     except Exception as e1:
         print(f"compat-scope failed for {name}: {e1}")
 
-    # ── Strategy 2: tf_keras + compat objects ─────────────────────────────────
+    # Strategy 2: tf_keras + full compat objects
     try:
         import tf_keras
-        compat_objects = _build_compat_objects()
         model = tf_keras.models.load_model(
-            model_path, compile=False, custom_objects=compat_objects
+            model_path, compile=False, custom_objects=_build_compat_objects()
         )
-        print(f"Loaded (tf_keras + compat): {name}")
+        print(f"Loaded (tf_keras+compat): {name}")
         return model
     except Exception as e2:
-        print(f"tf_keras + compat failed for {name}: {e2}")
+        print(f"tf_keras+compat failed for {name}: {e2}")
 
-    # ── Strategy 3: tf_keras alone (no custom objects) ────────────────────────
+    # Strategy 3: tf_keras alone
     try:
         import tf_keras
         model = tf_keras.models.load_model(model_path, compile=False)
@@ -136,31 +129,28 @@ def load_keras_model(model_path: str):
     except Exception as e3:
         print(f"tf_keras failed for {name}: {e3}")
 
-    # ── Strategy 4: plain keras compile=False ─────────────────────────────────
+    # Strategy 4: plain keras compile=False
     try:
         from tensorflow import keras
         model = keras.models.load_model(model_path, compile=False)
-        print(f"Loaded (keras compile=False): {name}")
+        print(f"Loaded (keras): {name}")
         return model
     except Exception as e4:
-        print(f"keras compile=False failed for {name}: {e4}")
+        print(f"keras failed for {name}: {e4}")
 
     print(f"ALL strategies failed for: {model_path}")
     return None
 
 
 def load_all_eye_models() -> dict:
-    models = {}
-    for name, path in EYE_MODEL_PATHS.items():
-        models[name] = load_keras_model(path)
-    return models
+    return {name: load_keras_model(path) for name, path in EYE_MODEL_PATHS.items()}
 
 
 def load_all_posture_models() -> dict:
-    models = {}
-    for name, path in POSTURE_MODEL_PATHS.items():
-        models[name] = load_keras_model(path) if path else None
-    return models
+    return {
+        name: (load_keras_model(path) if path else None)
+        for name, path in POSTURE_MODEL_PATHS.items()
+    }
 
 
 def load_results(model_name: str) -> dict:

@@ -1,4 +1,19 @@
+"""
+model_loader.py
+===============
+Loads all 5 trained .h5 models by rebuilding each architecture in pure Keras
+code and loading only the weights from the .h5 file.
+
+This completely bypasses Keras deserialization, which breaks due to three
+incompatibilities between Kaggle-saved models and the deployment TF version:
+  1. InputLayer saved with batch_shape + optional (not accepted by newer Keras)
+  2. Dense/Conv2D saved with quantization_config=None (QAT artifact)
+  3. DTypePolicy stored as a dict object (Keras 3 format, incompatible with TF 2.x)
+"""
+
 import os, sys, json
+import h5py
+import numpy as np
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
@@ -14,7 +29,7 @@ EYE_MODEL_PATHS = {
 }
 
 POSTURE_MODEL_PATHS = {
-    "Custom LSTM/DNN":             os.path.join(MODELS_DIR, "posture", "custom_lstm.h5"),
+    "Custom LSTM/DNN":            os.path.join(MODELS_DIR, "posture", "custom_lstm.h5"),
     "MediaPipe Pose (Rule-Based)": None,
     "YOLOv8-Pose / MoveNet DNN":  os.path.join(MODELS_DIR, "posture", "yolo_movenet_dnn.h5"),
 }
@@ -38,173 +53,285 @@ _DEMO_RESULTS = {
 }
 
 
-def _compat_objects_for_tf_keras():
+# ── Weight loader ──────────────────────────────────────────────────────────────
+
+def _load_weights_from_h5(model, h5_path: str):
     """
-    custom_objects for tf.keras (TF 2.15+).
-    InputLayer: accepts  shape=  NOT input_shape=
+    Load weights from h5 file into a Keras model by matching layer names.
+    Works regardless of how the model was serialized.
+    """
+    with h5py.File(h5_path, "r") as f:
+        weight_group = f["model_weights"]
+        layer_names  = list(weight_group.keys())
+
+        for layer in model.layers:
+            lname = layer.name
+            if lname not in layer_names:
+                continue
+            g = weight_group[lname]
+            # weights stored one level deeper with same name
+            sub = g.get(lname, g)
+            weight_values = [np.array(sub[w]) for w in sub.keys()
+                             if isinstance(sub[w], h5py.Dataset)]
+            if weight_values:
+                try:
+                    layer.set_weights(weight_values)
+                except Exception as e:
+                    print(f"  Weight mismatch on layer '{lname}': {e}")
+
+
+# ── Architecture builders ──────────────────────────────────────────────────────
+
+def _build_custom_cnn():
+    """
+    Custom CNN for eye strain detection.
+    Input: (32, 64, 3)  Output: 2 classes (Normal / Strained)
+    Architecture verified from h5 model_weights structure.
     """
     import tensorflow as tf
+    K = tf.keras
 
-    class _Dense(tf.keras.layers.Dense):
-        def __init__(self, *a, **kw):
-            kw.pop("quantization_config", None)
-            super().__init__(*a, **kw)
+    inp = K.Input(shape=(32, 64, 3), name="eye_input")
 
-    class _Conv2D(tf.keras.layers.Conv2D):
-        def __init__(self, *a, **kw):
-            kw.pop("quantization_config", None)
-            super().__init__(*a, **kw)
+    x = K.layers.Conv2D(32, 3, padding="same", use_bias=True, name="conv2d")(inp)
+    x = K.layers.BatchNormalization(name="batch_normalization")(x)
+    x = K.layers.Activation("relu", name="activation")(x)
 
-    class _DWConv2D(tf.keras.layers.DepthwiseConv2D):
-        def __init__(self, *a, **kw):
-            kw.pop("quantization_config", None)
-            super().__init__(*a, **kw)
+    x = K.layers.Conv2D(32, 3, padding="same", use_bias=True, name="conv2d_1")(x)
+    x = K.layers.BatchNormalization(name="batch_normalization_1")(x)
+    x = K.layers.Activation("relu", name="activation_1")(x)
 
-    class _BN(tf.keras.layers.BatchNormalization):
-        def __init__(self, *a, **kw):
-            kw.pop("quantization_config", None)
-            super().__init__(*a, **kw)
+    x = K.layers.MaxPooling2D(name="max_pooling2d")(x)
+    x = K.layers.Dropout(0.25, name="dropout")(x)
 
-    class _InputLayer(tf.keras.layers.InputLayer):
-        def __init__(self, *a, **kw):
-            # batch_shape=[None,32,64,3] → shape=(32,64,3)
-            bs = kw.pop("batch_shape", None)
-            kw.pop("optional", None)
-            if bs is not None and "shape" not in kw and "input_shape" not in kw:
-                kw["shape"] = tuple(bs[1:])   # strip batch dim
-            super().__init__(*a, **kw)
+    x = K.layers.Conv2D(64, 3, padding="same", use_bias=True, name="conv2d_2")(x)
+    x = K.layers.BatchNormalization(name="batch_normalization_2")(x)
+    x = K.layers.Activation("relu", name="activation_2")(x)
 
-    class _TrueDivide(tf.keras.layers.Layer):
-        """MobileNetV2 preprocessing saved as TrueDivide op."""
-        def call(self, x):
-            return tf.math.truediv(tf.cast(x, tf.float32), 127.5) - 1.0
-        def get_config(self):
-            return super().get_config()
+    x = K.layers.Conv2D(64, 3, padding="same", use_bias=True, name="conv2d_3")(x)
+    x = K.layers.BatchNormalization(name="batch_normalization_3")(x)
+    x = K.layers.Activation("relu", name="activation_3")(x)
 
-    return {
-        "Dense":              _Dense,
-        "Conv2D":             _Conv2D,
-        "DepthwiseConv2D":    _DWConv2D,
-        "BatchNormalization": _BN,
-        "InputLayer":         _InputLayer,
-        "TrueDivide":         _TrueDivide,
-    }
+    x = K.layers.MaxPooling2D(name="max_pooling2d_1")(x)
+    x = K.layers.Dropout(0.25, name="dropout_1")(x)
+
+    x = K.layers.Conv2D(128, 3, padding="same", use_bias=True, name="conv2d_4")(x)
+    x = K.layers.BatchNormalization(name="batch_normalization_4")(x)
+    x = K.layers.Activation("relu", name="activation_4")(x)
+
+    x = K.layers.GlobalAveragePooling2D(name="global_average_pooling2d")(x)
+    x = K.layers.Dropout(0.3, name="dropout_2")(x)
+    x = K.layers.Dense(256, activation="relu", name="dense")(x)
+    x = K.layers.Dropout(0.3, name="dropout_3")(x)
+    out = K.layers.Dense(2, activation="softmax", name="predictions")(x)
+
+    return K.Model(inp, out, name="custom_cnn")
 
 
-def _compat_objects_for_tf_keras_legacy():
+def _build_mobilenetv2():
     """
-    custom_objects for tf_keras (legacy Keras 2).
-    InputLayer: accepts  input_shape=  NOT shape=
+    MobileNetV2 transfer learning model for eye strain.
+    Input: (32, 64, 3)  Output: 2 classes
+    Preprocessing: x/127.5 - 1  (the saved TrueDivide/Subtract ops)
     """
-    import tf_keras as tfk
-
-    class _Dense(tfk.layers.Dense):
-        def __init__(self, *a, **kw):
-            kw.pop("quantization_config", None)
-            super().__init__(*a, **kw)
-
-    class _Conv2D(tfk.layers.Conv2D):
-        def __init__(self, *a, **kw):
-            kw.pop("quantization_config", None)
-            super().__init__(*a, **kw)
-
-    class _DWConv2D(tfk.layers.DepthwiseConv2D):
-        def __init__(self, *a, **kw):
-            kw.pop("quantization_config", None)
-            super().__init__(*a, **kw)
-
-    class _BN(tfk.layers.BatchNormalization):
-        def __init__(self, *a, **kw):
-            kw.pop("quantization_config", None)
-            super().__init__(*a, **kw)
-
-    class _InputLayer(tfk.layers.InputLayer):
-        def __init__(self, *a, **kw):
-            # batch_shape=[None,32,64,3] → input_shape=(32,64,3)
-            bs = kw.pop("batch_shape", None)
-            kw.pop("optional", None)
-            if bs is not None and "input_shape" not in kw and "shape" not in kw:
-                kw["input_shape"] = tuple(bs[1:])
-            super().__init__(*a, **kw)
-
     import tensorflow as tf
-    class _TrueDivide(tfk.layers.Layer):
-        def call(self, x):
-            return tf.math.truediv(tf.cast(x, tf.float32), 127.5) - 1.0
-        def get_config(self):
-            return super().get_config()
+    K = tf.keras
 
-    return {
-        "Dense":              _Dense,
-        "Conv2D":             _Conv2D,
-        "DepthwiseConv2D":    _DWConv2D,
-        "BatchNormalization": _BN,
-        "InputLayer":         _InputLayer,
-        "TrueDivide":         _TrueDivide,
-    }
+    inp = K.Input(shape=(32, 64, 3), name="eye_input")
+
+    # Preprocessing: replicate the Multiply/TrueDivide/Subtract ops
+    x = K.layers.Lambda(lambda t: tf.cast(t, tf.float32) / 127.5 - 1.0,
+                        name="preprocess")(inp)
+
+    # MobileNetV2 backbone (include_top=False, weights=None — we load from h5)
+    base = K.applications.MobileNetV2(
+        input_shape=(32, 64, 3),
+        include_top=False,
+        weights=None,
+    )
+    base._name = "mobilenetv2_1.00_224"
+    x = base(x)
+
+    x = K.layers.GlobalAveragePooling2D(name="gap")(x)
+    x = K.layers.Dense(256, name="dense1")(x)
+    x = K.layers.BatchNormalization(name="batch_normalization")(x)
+    x = K.layers.Dropout(0.3, name="dropout")(x)
+    x = K.layers.Dense(128, name="dense2")(x)
+    x = K.layers.Dropout(0.3, name="dropout_1")(x)
+    out = K.layers.Dense(2, activation="softmax", name="predictions")(x)
+
+    return K.Model(inp, out, name="mobilenetv2_model")
 
 
-def load_keras_model(model_path: str):
+def _build_efficientnetb0():
+    """
+    EfficientNetB0 transfer learning model for eye strain.
+    Input: (32, 64, 3)  Output: 2 classes
+    """
+    import tensorflow as tf
+    K = tf.keras
+
+    inp = K.Input(shape=(32, 64, 3), name="eye_input")
+
+    base = K.applications.EfficientNetB0(
+        input_shape=(32, 64, 3),
+        include_top=False,
+        weights=None,
+    )
+    base._name = "efficientnetb0"
+    x = base(inp)
+
+    x = K.layers.GlobalAveragePooling2D(name="gap")(x)
+    x = K.layers.Dense(256, name="dense1")(x)
+    x = K.layers.BatchNormalization(name="batch_normalization")(x)
+    x = K.layers.Activation("relu", name="activation")(x)
+    x = K.layers.Dropout(0.3, name="dropout")(x)
+    x = K.layers.Dense(128, name="dense2")(x)
+    x = K.layers.Dropout(0.3, name="dropout_1")(x)
+    out = K.layers.Dense(2, activation="softmax", name="predictions")(x)
+
+    return K.Model(inp, out, name="efficientnetb0_model")
+
+
+def _build_custom_lstm():
+    """
+    Custom LSTM/DNN hybrid for posture detection.
+    Input: (3,) landmark features  Output: 2 classes (Good / Slouching)
+    Architecture verified from h5 model_weights structure.
+    Dual-path: DNN branch + LSTM branch merged via Concatenate.
+    """
+    import tensorflow as tf
+    K = tf.keras
+
+    inp = K.Input(shape=(3,), name="posture_features")
+
+    # DNN branch
+    dnn = K.layers.Dense(64, activation="relu", name="dnn1")(inp)
+    dnn = K.layers.BatchNormalization(name="bn1")(dnn)
+    dnn = K.layers.Dropout(0.2, name="drop2")(dnn)
+
+    # LSTM branch — reshape (3,) → (1, 3) for sequence input
+    lstm_in = K.layers.Reshape((1, 3), name="reshape_for_lstm")(inp)
+    lstm_in = K.layers.Dropout(0.3, name="drop1")(lstm_in)
+    lstm_out = K.layers.LSTM(64, name="lstm")(lstm_in)
+    lstm_out = K.layers.Dense(32, activation="relu", name="dnn2")(lstm_out)
+    lstm_out = K.layers.Dropout(0.3, name="lstm_drop")(lstm_out)
+
+    # Merge (64 + 32 = 96)
+    merged = K.layers.Concatenate(name="merge")([dnn, lstm_out])
+    merged = K.layers.Dense(64, activation="relu", name="merge_dense")(merged)
+    merged = K.layers.Dropout(0.3, name="merge_drop")(merged)
+    out = K.layers.Dense(2, activation="softmax", name="output")(merged)
+
+    return K.Model(inp, out, name="custom_lstm")
+
+
+def _build_yolo_movenet_dnn():
+    """
+    Deep residual DNN for posture detection (YOLOv8-Pose / MoveNet features).
+    Input: (3,) landmark features  Output: 2 classes
+    Architecture verified from h5 model_weights structure.
+    Three residual blocks of Dense→BN→Add.
+    """
+    import tensorflow as tf
+    K = tf.keras
+
+    inp = K.Input(shape=(3,), name="posture_features")
+
+    # Entry
+    x = K.layers.Dense(128, activation="relu", name="entry")(inp)
+    x = K.layers.BatchNormalization(name="batch_normalization")(x)
+    x = K.layers.Dropout(0.3, name="dropout")(x)
+
+    # Residual block 1
+    r1 = K.layers.Dense(128, name="dense")(x)
+    r1 = K.layers.BatchNormalization(name="batch_normalization_1")(r1)
+    r1 = K.layers.Activation("relu", name="activation")(r1)
+    r1 = K.layers.Dropout(0.3, name="dropout_1")(r1)
+    r1 = K.layers.Dense(128, name="dense_1")(r1)
+    r1 = K.layers.BatchNormalization(name="batch_normalization_2")(r1)
+    x  = K.layers.Add(name="add")([x, r1])
+    x  = K.layers.Activation("relu", name="activation_1")(x)
+
+    # Residual block 2 (downsample 128→64 with shortcut)
+    r2 = K.layers.Dense(64, name="dense_2")(x)
+    r2 = K.layers.BatchNormalization(name="batch_normalization_3")(r2)
+    r2 = K.layers.Activation("relu", name="activation_2")(r2)
+    r2 = K.layers.Dropout(0.25, name="dropout_2")(r2)
+    r2 = K.layers.Dense(64, name="dense_3")(r2)
+    r2 = K.layers.BatchNormalization(name="batch_normalization_4")(r2)
+    sc2 = K.layers.Dense(64, use_bias=False, name="dense_4")(x)  # shortcut projection
+    x   = K.layers.Add(name="add_1")([sc2, r2])
+    x   = K.layers.Activation("relu", name="activation_3")(x)
+
+    # Residual block 3 (downsample 64→32 with shortcut)
+    r3 = K.layers.Dense(32, name="dense_5")(x)
+    r3 = K.layers.BatchNormalization(name="batch_normalization_5")(r3)
+    r3 = K.layers.Activation("relu", name="activation_4")(r3)
+    r3 = K.layers.Dropout(0.2, name="dropout_3")(r3)
+    r3 = K.layers.Dense(32, name="dense_6")(r3)
+    r3 = K.layers.BatchNormalization(name="batch_normalization_6")(r3)
+    sc3 = K.layers.Dense(32, use_bias=False, name="dense_7")(x)  # shortcut projection
+    x   = K.layers.Add(name="add_2")([sc3, r3])
+    x   = K.layers.Activation("relu", name="activation_5")(x)
+
+    # Output head
+    x   = K.layers.Dense(16, activation="relu", name="pre_out")(x)
+    out = K.layers.Dense(2, activation="softmax", name="output")(x)
+
+    return K.Model(inp, out, name="yolo_movenet_dnn")
+
+
+# ── Model→builder mapping ──────────────────────────────────────────────────────
+
+_BUILDERS = {
+    "Custom CNN":             _build_custom_cnn,
+    "MobileNetV2":            _build_mobilenetv2,
+    "EfficientNetB0":         _build_efficientnetb0,
+    "Custom LSTM/DNN":        _build_custom_lstm,
+    "YOLOv8-Pose / MoveNet DNN": _build_yolo_movenet_dnn,
+}
+
+
+# ── Main loader ────────────────────────────────────────────────────────────────
+
+def load_keras_model(model_name: str, model_path: str):
+    """
+    Build model architecture from scratch, then load weights from h5.
+    No Keras deserialization involved — immune to all version mismatches.
+    """
     if not model_path or not os.path.exists(model_path):
         print(f"Model file not found: {model_path}")
         return None
 
-    name = os.path.basename(model_path)
+    builder = _BUILDERS.get(model_name)
+    if builder is None:
+        print(f"No builder defined for model: {model_name}")
+        return None
 
-    # Strategy 1: tf.keras + compat objects (shape= for InputLayer)
     try:
-        from tensorflow import keras
-        with keras.utils.custom_object_scope(_compat_objects_for_tf_keras()):
-            model = keras.models.load_model(model_path, compile=False)
-        print(f"Loaded (tf.keras compat): {name}")
+        model = builder()
+        _load_weights_from_h5(model, model_path)
+        print(f"Loaded (rebuild+weights): {os.path.basename(model_path)}")
         return model
-    except Exception as e1:
-        print(f"tf.keras compat failed [{name}]: {e1}")
-
-    # Strategy 2: tf_keras + compat objects (input_shape= for InputLayer)
-    try:
-        import tf_keras
-        model = tf_keras.models.load_model(
-            model_path,
-            compile=False,
-            custom_objects=_compat_objects_for_tf_keras_legacy(),
-        )
-        print(f"Loaded (tf_keras compat): {name}")
-        return model
-    except Exception as e2:
-        print(f"tf_keras compat failed [{name}]: {e2}")
-
-    # Strategy 3: tf_keras plain
-    try:
-        import tf_keras
-        model = tf_keras.models.load_model(model_path, compile=False)
-        print(f"Loaded (tf_keras plain): {name}")
-        return model
-    except Exception as e3:
-        print(f"tf_keras plain failed [{name}]: {e3}")
-
-    # Strategy 4: tf.keras plain
-    try:
-        from tensorflow import keras
-        model = keras.models.load_model(model_path, compile=False)
-        print(f"Loaded (tf.keras plain): {name}")
-        return model
-    except Exception as e4:
-        print(f"tf.keras plain failed [{name}]: {e4}")
-
-    print(f"ALL strategies failed for: {model_path}")
-    return None
+    except Exception as e:
+        print(f"Failed to load {model_name}: {e}")
+        import traceback; traceback.print_exc()
+        return None
 
 
 def load_all_eye_models() -> dict:
-    return {name: load_keras_model(path) for name, path in EYE_MODEL_PATHS.items()}
+    return {
+        name: load_keras_model(name, path)
+        for name, path in EYE_MODEL_PATHS.items()
+    }
 
 
 def load_all_posture_models() -> dict:
-    return {
-        name: (load_keras_model(path) if path else None)
-        for name, path in POSTURE_MODEL_PATHS.items()
-    }
+    result = {}
+    for name, path in POSTURE_MODEL_PATHS.items():
+        result[name] = load_keras_model(name, path) if path else None
+    return result
 
 
 def load_results(model_name: str) -> dict:

@@ -38,57 +38,109 @@ _DEMO_RESULTS = {
 }
 
 
-def _build_compat_objects():
+def _compat_objects_for_tf_keras():
     """
-    Single custom_objects dict that fixes ALL known issues:
-      1. quantization_config=None  on Dense / Conv2D / DepthwiseConv2D / BatchNorm
-      2. batch_shape + optional    on InputLayer  →  convert batch_shape to shape
-      3. TrueDivide                on MobileNetV2 →  map to a Lambda layer
+    custom_objects for tf.keras (TF 2.15+).
+    InputLayer: accepts  shape=  NOT input_shape=
     """
     import tensorflow as tf
 
-    class _CompatDense(tf.keras.layers.Dense):
-        def __init__(self, *args, **kwargs):
-            kwargs.pop("quantization_config", None)
-            super().__init__(*args, **kwargs)
+    class _Dense(tf.keras.layers.Dense):
+        def __init__(self, *a, **kw):
+            kw.pop("quantization_config", None)
+            super().__init__(*a, **kw)
 
-    class _CompatConv2D(tf.keras.layers.Conv2D):
-        def __init__(self, *args, **kwargs):
-            kwargs.pop("quantization_config", None)
-            super().__init__(*args, **kwargs)
+    class _Conv2D(tf.keras.layers.Conv2D):
+        def __init__(self, *a, **kw):
+            kw.pop("quantization_config", None)
+            super().__init__(*a, **kw)
 
-    class _CompatDepthwiseConv2D(tf.keras.layers.DepthwiseConv2D):
-        def __init__(self, *args, **kwargs):
-            kwargs.pop("quantization_config", None)
-            super().__init__(*args, **kwargs)
+    class _DWConv2D(tf.keras.layers.DepthwiseConv2D):
+        def __init__(self, *a, **kw):
+            kw.pop("quantization_config", None)
+            super().__init__(*a, **kw)
 
-    class _CompatBatchNorm(tf.keras.layers.BatchNormalization):
-        def __init__(self, *args, **kwargs):
-            kwargs.pop("quantization_config", None)
-            super().__init__(*args, **kwargs)
+    class _BN(tf.keras.layers.BatchNormalization):
+        def __init__(self, *a, **kw):
+            kw.pop("quantization_config", None)
+            super().__init__(*a, **kw)
 
-    class _CompatInputLayer(tf.keras.layers.InputLayer):
-        def __init__(self, *args, **kwargs):
-            # batch_shape=[None, 32, 64, 3]  →  shape=(32, 64, 3)
-            batch_shape = kwargs.pop("batch_shape", None)
-            kwargs.pop("optional", None)
-            if batch_shape is not None and "shape" not in kwargs:
-                # strip the leading batch dimension
-                kwargs["shape"] = tuple(batch_shape[1:])
-            super().__init__(*args, **kwargs)
+    class _InputLayer(tf.keras.layers.InputLayer):
+        def __init__(self, *a, **kw):
+            # batch_shape=[None,32,64,3] → shape=(32,64,3)
+            bs = kw.pop("batch_shape", None)
+            kw.pop("optional", None)
+            if bs is not None and "shape" not in kw and "input_shape" not in kw:
+                kw["shape"] = tuple(bs[1:])   # strip batch dim
+            super().__init__(*a, **kw)
 
-    # MobileNetV2 serialises its /127.5-1 preprocessing as a TrueDivide layer
     class _TrueDivide(tf.keras.layers.Layer):
-        def call(self, inputs):
-            return tf.math.truediv(inputs, 127.5) - 1.0
+        """MobileNetV2 preprocessing saved as TrueDivide op."""
+        def call(self, x):
+            return tf.math.truediv(tf.cast(x, tf.float32), 127.5) - 1.0
+        def get_config(self):
+            return super().get_config()
 
     return {
-        "Dense":               _CompatDense,
-        "Conv2D":              _CompatConv2D,
-        "DepthwiseConv2D":     _CompatDepthwiseConv2D,
-        "BatchNormalization":  _CompatBatchNorm,
-        "InputLayer":          _CompatInputLayer,
-        "TrueDivide":          _TrueDivide,
+        "Dense":              _Dense,
+        "Conv2D":             _Conv2D,
+        "DepthwiseConv2D":    _DWConv2D,
+        "BatchNormalization": _BN,
+        "InputLayer":         _InputLayer,
+        "TrueDivide":         _TrueDivide,
+    }
+
+
+def _compat_objects_for_tf_keras_legacy():
+    """
+    custom_objects for tf_keras (legacy Keras 2).
+    InputLayer: accepts  input_shape=  NOT shape=
+    """
+    import tf_keras as tfk
+
+    class _Dense(tfk.layers.Dense):
+        def __init__(self, *a, **kw):
+            kw.pop("quantization_config", None)
+            super().__init__(*a, **kw)
+
+    class _Conv2D(tfk.layers.Conv2D):
+        def __init__(self, *a, **kw):
+            kw.pop("quantization_config", None)
+            super().__init__(*a, **kw)
+
+    class _DWConv2D(tfk.layers.DepthwiseConv2D):
+        def __init__(self, *a, **kw):
+            kw.pop("quantization_config", None)
+            super().__init__(*a, **kw)
+
+    class _BN(tfk.layers.BatchNormalization):
+        def __init__(self, *a, **kw):
+            kw.pop("quantization_config", None)
+            super().__init__(*a, **kw)
+
+    class _InputLayer(tfk.layers.InputLayer):
+        def __init__(self, *a, **kw):
+            # batch_shape=[None,32,64,3] → input_shape=(32,64,3)
+            bs = kw.pop("batch_shape", None)
+            kw.pop("optional", None)
+            if bs is not None and "input_shape" not in kw and "shape" not in kw:
+                kw["input_shape"] = tuple(bs[1:])
+            super().__init__(*a, **kw)
+
+    import tensorflow as tf
+    class _TrueDivide(tfk.layers.Layer):
+        def call(self, x):
+            return tf.math.truediv(tf.cast(x, tf.float32), 127.5) - 1.0
+        def get_config(self):
+            return super().get_config()
+
+    return {
+        "Dense":              _Dense,
+        "Conv2D":             _Conv2D,
+        "DepthwiseConv2D":    _DWConv2D,
+        "BatchNormalization": _BN,
+        "InputLayer":         _InputLayer,
+        "TrueDivide":         _TrueDivide,
     }
 
 
@@ -99,44 +151,46 @@ def load_keras_model(model_path: str):
 
     name = os.path.basename(model_path)
 
-    # Strategy 1: keras + full compat objects  (fixes all 3 issues at once)
+    # Strategy 1: tf.keras + compat objects (shape= for InputLayer)
     try:
         from tensorflow import keras
-        with keras.utils.custom_object_scope(_build_compat_objects()):
+        with keras.utils.custom_object_scope(_compat_objects_for_tf_keras()):
             model = keras.models.load_model(model_path, compile=False)
-        print(f"Loaded (compat-scope): {name}")
+        print(f"Loaded (tf.keras compat): {name}")
         return model
     except Exception as e1:
-        print(f"compat-scope failed for {name}: {e1}")
+        print(f"tf.keras compat failed [{name}]: {e1}")
 
-    # Strategy 2: tf_keras + full compat objects
+    # Strategy 2: tf_keras + compat objects (input_shape= for InputLayer)
     try:
         import tf_keras
         model = tf_keras.models.load_model(
-            model_path, compile=False, custom_objects=_build_compat_objects()
+            model_path,
+            compile=False,
+            custom_objects=_compat_objects_for_tf_keras_legacy(),
         )
-        print(f"Loaded (tf_keras+compat): {name}")
+        print(f"Loaded (tf_keras compat): {name}")
         return model
     except Exception as e2:
-        print(f"tf_keras+compat failed for {name}: {e2}")
+        print(f"tf_keras compat failed [{name}]: {e2}")
 
-    # Strategy 3: tf_keras alone
+    # Strategy 3: tf_keras plain
     try:
         import tf_keras
         model = tf_keras.models.load_model(model_path, compile=False)
-        print(f"Loaded (tf_keras): {name}")
+        print(f"Loaded (tf_keras plain): {name}")
         return model
     except Exception as e3:
-        print(f"tf_keras failed for {name}: {e3}")
+        print(f"tf_keras plain failed [{name}]: {e3}")
 
-    # Strategy 4: plain keras compile=False
+    # Strategy 4: tf.keras plain
     try:
         from tensorflow import keras
         model = keras.models.load_model(model_path, compile=False)
-        print(f"Loaded (keras): {name}")
+        print(f"Loaded (tf.keras plain): {name}")
         return model
     except Exception as e4:
-        print(f"keras failed for {name}: {e4}")
+        print(f"tf.keras plain failed [{name}]: {e4}")
 
     print(f"ALL strategies failed for: {model_path}")
     return None

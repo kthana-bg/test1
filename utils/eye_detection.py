@@ -50,12 +50,16 @@ def get_eye_roi(frame: np.ndarray, eye_landmarks: np.ndarray, padding: int = 10)
     return roi
 
 def preprocess_eye_image(roi: np.ndarray, model_name: str) -> np.ndarray:
-    # Resize and normalize based on model
+    roi_rgb = cv2.cvtColor(roi, cv2.COLOR_BGR2RGB)
+    
+    # Resize based on model architecture
     target_size = (96, 96) if model_name == "EfficientNetB0" else (64, 32)
-    resized = cv2.resize(roi, target_size)
+    resized = cv2.resize(roi_rgb, target_size)
     img = resized.astype(np.float32)
-    if model_name != "EfficientNetB0":
+    
+    if model_name == "Custom CNN":
         img /= 255.0
+        
     return np.expand_dims(img, axis=0)
 
 def run_eye_model_inference(model, roi: np.ndarray, model_name: str) -> dict:

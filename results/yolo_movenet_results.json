@@ -1,0 +1,55 @@
+{
+  "model_name": "YOLOv8-Pose / MoveNet DNN",
+  "task": "Posture Detection",
+  "dataset": "alnatron/posture-detection",
+  "features": [
+    "angle_y",
+    "angle_z",
+    "emg"
+  ],
+  "binary_map": {
+    "Good Posture": 0,
+    "Slouching": 1,
+    "Leaning Forward": 1,
+    "Neck Bend": 1,
+    "Shoulder Tilt": 1
+  },
+  "accuracy": 0.5821,
+  "precision": 0.6142,
+  "recall": 0.5821,
+  "f1_score": 0.5947,
+  "roc_auc": 0.5415,
+  "latency_ms": 88.56,
+  "threshold": 0.5,
+  "confusion_matrix": [
+    [
+      1142,
+      1513
+    ],
+    [
+      2248,
+      4097
+    ]
+  ],
+  "classification_report": "               precision    recall  f1-score   support\n\n         Good       0.34      0.43      0.38      2655\nSlouching/Bad       0.73      0.65      0.69      6345\n\n     accuracy                           0.58      9000\n    macro avg       0.53      0.54      0.53      9000\n weighted avg       0.61      0.58      0.59      9000\n",
+  "feature_importance": [
+    {
+      "feature": "angle_z (neck tilt Z)",
+      "importance": 0.025778
+    },
+    {
+      "feature": "angle_y (neck tilt Y)",
+      "importance": 0.024444
+    },
+    {
+      "feature": "emg (muscle activity)",
+      "importance": 0.022
+    }
+  ],
+  "hyperparameters": {
+    "batch_size": 64,
+    "epochs": 100,
+    "lr": 0.0008,
+    "weight_decay": 0.0001
+  }
+}

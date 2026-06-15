@@ -1,0 +1,31 @@
+{
+  "model_name": "MediaPipe Pose",
+  "task": "Posture Detection",
+  "dataset": "alnatron/posture-detection",
+  "features_used": [
+    "angle_y"
+  ],
+  "threshold_used": 8.0,
+  "threshold": 0.5,
+  "accuracy": 0.5814,
+  "precision": 0.5848,
+  "recall": 0.5814,
+  "f1_score": 0.583,
+  "roc_auc": 0.5088,
+  "latency_ms": 0.0019,
+  "confusion_matrix": [
+    [
+      4041,
+      9234
+    ],
+    [
+      9603,
+      22122
+    ]
+  ],
+  "classification_report": "               precision    recall  f1-score   support\n\n         Good       0.30      0.30      0.30     13275\nSlouching/Bad       0.71      0.70      0.70     31725\n\n     accuracy                           0.58     45000\n    macro avg       0.50      0.50      0.50     45000\n weighted avg       0.58      0.58      0.58     45000\n",
+  "classes": [
+    "Good",
+    "Slouching/Bad"
+  ]
+}

@@ -1,18 +1,4 @@
-"""
-model_loader.py
-===============
-Loads all 5 trained .h5 models by rebuilding each architecture in pure Keras
-code and loading only the weights from the .h5 file.
-
-This completely bypasses Keras deserialization, which breaks due to three
-incompatibilities between Kaggle-saved models and the deployment TF version:
-  1. InputLayer saved with batch_shape + optional (not accepted by newer Keras)
-  2. Dense/Conv2D saved with quantization_config=None (QAT artifact)
-  3. DTypePolicy stored as a dict object (Keras 3 format, incompatible with TF 2.x)
-"""
-
 import os, sys, json
-import h5py
 import numpy as np
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -29,9 +15,9 @@ EYE_MODEL_PATHS = {
 }
 
 POSTURE_MODEL_PATHS = {
-    "Custom LSTM/DNN":            os.path.join(MODELS_DIR, "posture", "custom_lstm.h5"),
+    "Custom LSTM/DNN":             os.path.join(MODELS_DIR, "posture", "custom_lstm.h5"),
     "MediaPipe Pose (Rule-Based)": None,
-    "YOLOv8-Pose / MoveNet DNN":  os.path.join(MODELS_DIR, "posture", "yolo_movenet_dnn.h5"),
+    "YOLOv8-Pose / MoveNet DNN":   os.path.join(MODELS_DIR, "posture", "yolo_movenet_dnn.h5"),
 }
 
 RESULTS_PATHS = {
@@ -40,7 +26,7 @@ RESULTS_PATHS = {
     "EfficientNetB0":              os.path.join(RESULTS_DIR, "efficientnetb0_results.json"),
     "Custom LSTM/DNN":             os.path.join(RESULTS_DIR, "custom_lstm_results.json"),
     "MediaPipe Pose (Rule-Based)": os.path.join(RESULTS_DIR, "mediapipe_results.json"),
-    "YOLOv8-Pose / MoveNet DNN":  os.path.join(RESULTS_DIR, "yolo_movenet_results.json"),
+    "YOLOv8-Pose / MoveNet DNN":   os.path.join(RESULTS_DIR, "yolo_movenet_results.json"),
 }
 
 _DEMO_RESULTS = {
@@ -49,45 +35,18 @@ _DEMO_RESULTS = {
     "EfficientNetB0":              {"accuracy": 0.94, "f1_score": 0.93, "latency_ms": 15.2},
     "Custom LSTM/DNN":             {"accuracy": 0.85, "f1_score": 0.84, "latency_ms":  5.1},
     "MediaPipe Pose (Rule-Based)": {"accuracy": 0.82, "f1_score": 0.81, "latency_ms":  2.4},
-    "YOLOv8-Pose / MoveNet DNN":  {"accuracy": 0.92, "f1_score": 0.91, "latency_ms": 18.6},
+    "YOLOv8-Pose / MoveNet DNN":   {"accuracy": 0.92, "f1_score": 0.91, "latency_ms": 18.6},
 }
 
-
-# ── Weight loader ──────────────────────────────────────────────────────────────
-
+# Load weights using Keras native by_name mapping
 def _load_weights_from_h5(model, h5_path: str):
-    """
-    Load weights from h5 file into a Keras model by matching layer names.
-    Works regardless of how the model was serialized.
-    """
-    with h5py.File(h5_path, "r") as f:
-        weight_group = f["model_weights"]
-        layer_names  = list(weight_group.keys())
+    try:
+        model.load_weights(h5_path, by_name=True)
+    except Exception as e:
+        print(f"  Failed to load weights: {e}")
 
-        for layer in model.layers:
-            lname = layer.name
-            if lname not in layer_names:
-                continue
-            g = weight_group[lname]
-            # weights stored one level deeper with same name
-            sub = g.get(lname, g)
-            weight_values = [np.array(sub[w]) for w in sub.keys()
-                             if isinstance(sub[w], h5py.Dataset)]
-            if weight_values:
-                try:
-                    layer.set_weights(weight_values)
-                except Exception as e:
-                    print(f"  Weight mismatch on layer '{lname}': {e}")
-
-
-# ── Architecture builders ──────────────────────────────────────────────────────
-
+# Custom CNN for eye strain detection
 def _build_custom_cnn():
-    """
-    Custom CNN for eye strain detection.
-    Input: (32, 64, 3)  Output: 2 classes (Normal / Strained)
-    Architecture verified from h5 model_weights structure.
-    """
     import tensorflow as tf
     K = tf.keras
 
@@ -127,23 +86,14 @@ def _build_custom_cnn():
 
     return K.Model(inp, out, name="custom_cnn")
 
-
+# MobileNetV2 transfer learning model
 def _build_mobilenetv2():
-    """
-    MobileNetV2 transfer learning model for eye strain.
-    Input: (32, 64, 3)  Output: 2 classes
-    Preprocessing: x/127.5 - 1  (the saved TrueDivide/Subtract ops)
-    """
     import tensorflow as tf
     K = tf.keras
 
     inp = K.Input(shape=(32, 64, 3), name="eye_input")
+    x = K.layers.Lambda(lambda t: tf.cast(t, tf.float32) / 127.5 - 1.0, name="preprocess")(inp)
 
-    # Preprocessing: replicate the Multiply/TrueDivide/Subtract ops
-    x = K.layers.Lambda(lambda t: tf.cast(t, tf.float32) / 127.5 - 1.0,
-                        name="preprocess")(inp)
-
-    # MobileNetV2 backbone (include_top=False, weights=None — we load from h5)
     base = K.applications.MobileNetV2(
         input_shape=(32, 64, 3),
         include_top=False,
@@ -162,19 +112,15 @@ def _build_mobilenetv2():
 
     return K.Model(inp, out, name="mobilenetv2_model")
 
-
+# EfficientNetB0 transfer learning model
 def _build_efficientnetb0():
-    """
-    EfficientNetB0 transfer learning model for eye strain.
-    Input: (32, 64, 3)  Output: 2 classes
-    """
     import tensorflow as tf
     K = tf.keras
 
-    inp = K.Input(shape=(32, 64, 3), name="eye_input")
+    inp = K.Input(shape=(96, 96, 3), name="eye_input")
 
     base = K.applications.EfficientNetB0(
-        input_shape=(32, 64, 3),
+        input_shape=(96, 96, 3),
         include_top=False,
         weights=None,
     )
@@ -192,32 +138,23 @@ def _build_efficientnetb0():
 
     return K.Model(inp, out, name="efficientnetb0_model")
 
-
+# Custom LSTM/DNN hybrid for posture detection
 def _build_custom_lstm():
-    """
-    Custom LSTM/DNN hybrid for posture detection.
-    Input: (3,) landmark features  Output: 2 classes (Good / Slouching)
-    Architecture verified from h5 model_weights structure.
-    Dual-path: DNN branch + LSTM branch merged via Concatenate.
-    """
     import tensorflow as tf
     K = tf.keras
 
     inp = K.Input(shape=(3,), name="posture_features")
 
-    # DNN branch
     dnn = K.layers.Dense(64, activation="relu", name="dnn1")(inp)
     dnn = K.layers.BatchNormalization(name="bn1")(dnn)
     dnn = K.layers.Dropout(0.2, name="drop2")(dnn)
 
-    # LSTM branch — reshape (3,) → (1, 3) for sequence input
     lstm_in = K.layers.Reshape((1, 3), name="reshape_for_lstm")(inp)
     lstm_in = K.layers.Dropout(0.3, name="drop1")(lstm_in)
     lstm_out = K.layers.LSTM(64, name="lstm")(lstm_in)
     lstm_out = K.layers.Dense(32, activation="relu", name="dnn2")(lstm_out)
     lstm_out = K.layers.Dropout(0.3, name="lstm_drop")(lstm_out)
 
-    # Merge (64 + 32 = 96)
     merged = K.layers.Concatenate(name="merge")([dnn, lstm_out])
     merged = K.layers.Dense(64, activation="relu", name="merge_dense")(merged)
     merged = K.layers.Dropout(0.3, name="merge_drop")(merged)
@@ -225,25 +162,17 @@ def _build_custom_lstm():
 
     return K.Model(inp, out, name="custom_lstm")
 
-
+# Deep residual DNN for posture detection
 def _build_yolo_movenet_dnn():
-    """
-    Deep residual DNN for posture detection (YOLOv8-Pose / MoveNet features).
-    Input: (3,) landmark features  Output: 2 classes
-    Architecture verified from h5 model_weights structure.
-    Three residual blocks of Dense→BN→Add.
-    """
     import tensorflow as tf
     K = tf.keras
 
     inp = K.Input(shape=(3,), name="posture_features")
 
-    # Entry
     x = K.layers.Dense(128, activation="relu", name="entry")(inp)
     x = K.layers.BatchNormalization(name="batch_normalization")(x)
     x = K.layers.Dropout(0.3, name="dropout")(x)
 
-    # Residual block 1
     r1 = K.layers.Dense(128, name="dense")(x)
     r1 = K.layers.BatchNormalization(name="batch_normalization_1")(r1)
     r1 = K.layers.Activation("relu", name="activation")(r1)
@@ -253,53 +182,42 @@ def _build_yolo_movenet_dnn():
     x  = K.layers.Add(name="add")([x, r1])
     x  = K.layers.Activation("relu", name="activation_1")(x)
 
-    # Residual block 2 (downsample 128→64 with shortcut)
     r2 = K.layers.Dense(64, name="dense_2")(x)
     r2 = K.layers.BatchNormalization(name="batch_normalization_3")(r2)
     r2 = K.layers.Activation("relu", name="activation_2")(r2)
     r2 = K.layers.Dropout(0.25, name="dropout_2")(r2)
     r2 = K.layers.Dense(64, name="dense_3")(r2)
     r2 = K.layers.BatchNormalization(name="batch_normalization_4")(r2)
-    sc2 = K.layers.Dense(64, use_bias=False, name="dense_4")(x)  # shortcut projection
+    sc2 = K.layers.Dense(64, use_bias=False, name="dense_4")(x)
     x   = K.layers.Add(name="add_1")([sc2, r2])
     x   = K.layers.Activation("relu", name="activation_3")(x)
 
-    # Residual block 3 (downsample 64→32 with shortcut)
     r3 = K.layers.Dense(32, name="dense_5")(x)
     r3 = K.layers.BatchNormalization(name="batch_normalization_5")(r3)
     r3 = K.layers.Activation("relu", name="activation_4")(r3)
     r3 = K.layers.Dropout(0.2, name="dropout_3")(r3)
     r3 = K.layers.Dense(32, name="dense_6")(r3)
     r3 = K.layers.BatchNormalization(name="batch_normalization_6")(r3)
-    sc3 = K.layers.Dense(32, use_bias=False, name="dense_7")(x)  # shortcut projection
+    sc3 = K.layers.Dense(32, use_bias=False, name="dense_7")(x)
     x   = K.layers.Add(name="add_2")([sc3, r3])
     x   = K.layers.Activation("relu", name="activation_5")(x)
 
-    # Output head
     x   = K.layers.Dense(16, activation="relu", name="pre_out")(x)
     out = K.layers.Dense(2, activation="softmax", name="output")(x)
 
     return K.Model(inp, out, name="yolo_movenet_dnn")
 
-
-# ── Model→builder mapping ──────────────────────────────────────────────────────
-
+# Map models to builder functions
 _BUILDERS = {
-    "Custom CNN":             _build_custom_cnn,
-    "MobileNetV2":            _build_mobilenetv2,
-    "EfficientNetB0":         _build_efficientnetb0,
-    "Custom LSTM/DNN":        _build_custom_lstm,
-    "YOLOv8-Pose / MoveNet DNN": _build_yolo_movenet_dnn,
+    "Custom CNN":               _build_custom_cnn,
+    "MobileNetV2":              _build_mobilenetv2,
+    "EfficientNetB0":           _build_efficientnetb0,
+    "Custom LSTM/DNN":          _build_custom_lstm,
+    "YOLOv8-Pose / MoveNet DNN":_build_yolo_movenet_dnn,
 }
 
-
-# ── Main loader ────────────────────────────────────────────────────────────────
-
+# Build model and load weights
 def load_keras_model(model_name: str, model_path: str):
-    """
-    Build model architecture from scratch, then load weights from h5.
-    No Keras deserialization involved — immune to all version mismatches.
-    """
     if not model_path or not os.path.exists(model_path):
         print(f"Model file not found: {model_path}")
         return None
@@ -319,21 +237,21 @@ def load_keras_model(model_name: str, model_path: str):
         import traceback; traceback.print_exc()
         return None
 
-
+# Load all models for eye strain
 def load_all_eye_models() -> dict:
     return {
         name: load_keras_model(name, path)
         for name, path in EYE_MODEL_PATHS.items()
     }
 
-
+# Load all models for posture
 def load_all_posture_models() -> dict:
     result = {}
     for name, path in POSTURE_MODEL_PATHS.items():
         result[name] = load_keras_model(name, path) if path else None
     return result
 
-
+# Load evaluation results
 def load_results(model_name: str) -> dict:
     path = RESULTS_PATHS.get(model_name)
     if path and os.path.exists(path):
@@ -341,6 +259,6 @@ def load_results(model_name: str) -> dict:
             return json.load(f)
     return _DEMO_RESULTS.get(model_name, {"accuracy": 0.80, "f1_score": 0.79, "latency_ms": 10.0})
 
-
+# Return results for all models
 def load_all_results() -> dict:
     return {name: load_results(name) for name in RESULTS_PATHS}

@@ -45,7 +45,6 @@ from pages.monitoring_tab import render_monitoring_tab
 from pages.comparison_tab import render_comparison_tab
 from pages.analytics_tab import render_analytics_tab
 
-
 @st.cache_resource(show_spinner="Loading AI models...")
 def _load_models_cached():
     """
@@ -57,24 +56,22 @@ def _load_models_cached():
     posture_models = load_all_posture_models()
     return eye_models, posture_models
 
-
 def init_session_state():
     defaults = {
-        "logged_in":                 False,
-        "user":                      None,
-        "user_id":                   None,
-        "username":                  None,
-        "monitoring_active":         False,
-        "session_start":             None,
-        "last_metric_save":          0,
-        "active_eye_model_name":     "Custom CNN",
+        "logged_in": False,
+        "user": None,
+        "user_id": None,
+        "username": None,
+        "monitoring_active": False,
+        "session_start": None,
+        "last_metric_save": 0,
+        "active_eye_model_name": "Custom CNN",
         "active_posture_model_name": "Custom LSTM/DNN",
-        "captured_embedding":        None,
+        "captured_embedding": None,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
-
 
 def render_sidebar():
     with st.sidebar:
@@ -91,7 +88,6 @@ def render_sidebar():
                     del st.session_state[key]
                 init_session_state()
                 st.rerun()
-
 
 def main():
     init_session_state()
@@ -136,7 +132,6 @@ def main():
 
     with tab3:
         render_analytics_tab(user_id=user_id)
-
 
 if __name__ == "__main__":
     main()

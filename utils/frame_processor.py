@@ -87,8 +87,6 @@ def load_mediapipe_landmarkers():
                 min_face_detection_confidence=0.5,
                 min_face_presence_confidence=0.5,
                 min_tracking_confidence=0.5,
-                output_face_blendshapes=False,
-                output_facial_transformation_matrixes=False,
             )
             face_lm = vision.FaceLandmarker.create_from_options(face_opts)
 
@@ -113,6 +111,7 @@ def process_frame(
     eye_model, eye_model_name,
     posture_model, posture_model_name,
     ear_consec_counter,
+    prev_posture_angle=None
 ):
     import mediapipe as mp
 
@@ -131,6 +130,7 @@ def process_frame(
     eye_lat = 0.0
     face_detected = False
 
+    # ── Eye Detection ──
     if face_landmarker is not None:
         try:
             face_result = face_landmarker.detect(mp_image)
@@ -164,10 +164,11 @@ def process_frame(
             print(f"Face detection error: {e}")
 
     posture_status = "Unknown"
-    posture_angle = 0.0
+    posture_angle = prev_posture_angle if prev_posture_angle is not None else 0.0
     posture_conf = 0.0
     posture_lat = 0.0
 
+    # ── Posture Detection ──
     if pose_landmarker is not None:
         try:
             pose_result = pose_landmarker.detect(mp_image)
@@ -194,7 +195,14 @@ def process_frame(
                     (lm_dict["left_shoulder"][1] + lm_dict["right_shoulder"][1]) // 2,
                 )
                 
-                posture_angle = calculate_neck_tilt_angle(ear_mid, shoulder_mid)
+                raw_angle = calculate_neck_tilt_angle(ear_mid, shoulder_mid)
+                
+                # EMA Smoothing to eliminate jitter
+                if prev_posture_angle is not None:
+                    posture_angle = (0.8 * prev_posture_angle) + (0.2 * raw_angle)
+                else:
+                    posture_angle = raw_angle
+
                 posture_status = classify_posture_by_angle(posture_angle)
 
                 if posture_model is not None and "Rule" not in posture_model_name and "MediaPipe" not in posture_model_name:
@@ -233,7 +241,7 @@ def process_frame(
     result.health_score = health_score
     result.face_detected = face_detected
 
-    return result, ear_consec_counter
+    return result, ear_consec_counter, posture_angle
 
 try:
     from streamlit_webrtc import VideoTransformerBase
@@ -247,6 +255,7 @@ try:
             self._lock = threading.Lock()
             self._ear_consec = 0
             self._frame_count = 0
+            self._last_posture_angle = None
 
             self.face_landmarker = None
             self.pose_landmarker = None
@@ -254,7 +263,6 @@ try:
             self.eye_model_name = "Custom CNN"
             self.posture_model = None
             self.posture_model_name = "Custom LSTM/DNN"
-            self._models_ready = False
 
         def update_models(self, face_lm, pose_lm, eye_model, eye_model_name, posture_model, posture_model_name):
             with self._lock:
@@ -264,7 +272,6 @@ try:
                 self.eye_model_name = eye_model_name
                 self.posture_model = posture_model
                 self.posture_model_name = posture_model_name
-                self._models_ready = (eye_model is not None and posture_model is not None)
 
         def recv(self, frame: "av.VideoFrame") -> "av.VideoFrame":
             img_bgr = frame.to_ndarray(format="bgr24")
@@ -281,18 +288,21 @@ try:
                     posture_m = self.posture_model
                     posture_mn = self.posture_model_name
                     ear_consec = self._ear_consec
+                    prev_angle = self._last_posture_angle
 
-                fr, new_ear_consec = process_frame(
+                fr, new_ear_consec, new_posture_angle = process_frame(
                     img_bgr,
                     face_lm, pose_lm,
                     eye_m, eye_mn,
                     posture_m, posture_mn,
                     ear_consec,
+                    prev_angle
                 )
 
                 with self._lock:
                     self._result = fr
                     self._ear_consec = new_ear_consec
+                    self._last_posture_angle = new_posture_angle
 
                 img_bgr = fr.frame_bgr if fr.frame_bgr is not None else img_bgr
 

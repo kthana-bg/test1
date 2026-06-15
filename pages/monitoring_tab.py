@@ -1,7 +1,3 @@
-"""
-Live Monitoring Tab — Twilio TURN + trained model inference
-"""
-
 import streamlit as st
 import time
 import sys
@@ -15,15 +11,13 @@ from utils.frame_processor import FrameResult, load_mediapipe_landmarkers
 from utils.voice_guidance import voice_guidance
 from database.db_manager import save_health_metric
 
-
-# ── Twilio TURN ice config ─────────────────────────────────────────────────────
 def _get_rtc_configuration():
     try:
         from twilio.rest import Client
         sid   = os.environ.get("TWILIO_ACCOUNT_SID", "").strip()
         token = os.environ.get("TWILIO_AUTH_TOKEN", "").strip()
         if sid and token:
-            client    = Client(sid, token)
+            client   = Client(sid, token)
             token_obj = client.tokens.create()
             return {"iceServers": token_obj.ice_servers}
     except Exception as e:
@@ -35,18 +29,13 @@ def _get_rtc_configuration():
         ]
     }
 
-
-# ── UI helpers ─────────────────────────────────────────────────────────────────
-
 def _get_status_color(status: str, good_value: str = "Normal") -> str:
     return "#2ecc71" if status == good_value else "#e74c3c"
-
 
 def _get_health_color(score: float) -> str:
     if score >= 75:   return "#2ecc71"
     elif score >= 50: return "#f39c12"
     return "#e74c3c"
-
 
 def _metric_card(label: str, value: str, color: str, sub_text: str = ""):
     sub_html = (
@@ -70,7 +59,6 @@ def _metric_card(label: str, value: str, color: str, sub_text: str = ""):
         """,
         unsafe_allow_html=True,
     )
-
 
 def _render_metrics_panel(result: FrameResult, eye_model_name: str, posture_model_name: str):
     st.markdown(
@@ -109,7 +97,7 @@ def _render_metrics_panel(result: FrameResult, eye_model_name: str, posture_mode
         unsafe_allow_html=True,
     )
     face_color = "#2ecc71" if result.face_detected else "#e74c3c"
-    face_text  = "✓ Face Detected" if result.face_detected else "✗ No Face"
+    face_text  = "Face Detected" if result.face_detected else "No Face Detected"
     st.markdown(
         f"""
         <div style="margin-top:8px;padding:8px 12px;
@@ -121,9 +109,6 @@ def _render_metrics_panel(result: FrameResult, eye_model_name: str, posture_mode
         """,
         unsafe_allow_html=True,
     )
-
-
-# ── Main tab renderer ──────────────────────────────────────────────────────────
 
 def render_monitoring_tab(
     processor,
@@ -142,7 +127,6 @@ def render_monitoring_tab(
         st.error(f"streamlit-webrtc not available: {err}")
         return
 
-    # ── Session controls ───────────────────────────────────────────────────────
     col_start, col_stop, col_voice = st.columns([1, 1, 2])
     with col_start:
         if st.button("Start Session", use_container_width=True, key="mon_start"):
@@ -160,21 +144,17 @@ def render_monitoring_tab(
     st.divider()
 
     if not st.session_state.get("monitoring_active", False):
-        st.info("Click **Start Session** to begin live monitoring.")
+        st.info("Click Start Session to begin live monitoring.")
         return
 
-    # ── Load MediaPipe landmarkers once (cached in session_state) ─────────────
     if "mp_landmarkers" not in st.session_state:
-        with st.spinner("Loading MediaPipe landmarkers…"):
+        with st.spinner("Loading MediaPipe landmarkers..."):
             st.session_state["mp_landmarkers"] = load_mediapipe_landmarkers()
     face_lm, pose_lm = st.session_state["mp_landmarkers"]
 
-    # ── Load AI models ONCE — cached in session_state on first load only ────────
-    # Do NOT import from app.py — importing it triggers st.set_page_config()
-    # a second time which crashes Streamlit. Use session_state as the cache.
     if "vm_eye_models" not in st.session_state or "vm_posture_models" not in st.session_state:
         from utils.model_loader import load_all_eye_models, load_all_posture_models
-        with st.spinner("Loading AI models…"):
+        with st.spinner("Loading AI models..."):
             st.session_state["vm_eye_models"]     = load_all_eye_models()
             st.session_state["vm_posture_models"] = load_all_posture_models()
 
@@ -184,53 +164,36 @@ def render_monitoring_tab(
     eye_model     = eye_models.get(eye_model_name)
     posture_model = posture_models.get(posture_model_name)
 
-    # ── Debug: warn loudly in the UI if models failed to load ─────────────────
     if eye_model is None:
-        st.warning(f"⚠️ Eye model '{eye_model_name}' failed to load — check the .h5 file in models/eye_strain/. Falling back to EAR rule.")
+        st.warning(f"Eye model '{eye_model_name}' failed to load. Falling back to EAR rule.")
     if posture_model is None:
-        st.warning(f"⚠️ Posture model '{posture_model_name}' failed to load — check the .h5 file in models/posture/. Falling back to angle rule.")
+        st.warning(f"Posture model '{posture_model_name}' failed to load. Falling back to angle rule.")
 
-    # ── CSS: constrain webrtc widget width ────────────────────────────────────
-    st.markdown(
-        """
-        <style>
-        div[data-testid="stVerticalBlock"] > div:has(> iframe) {
-            max-width: 58% !important;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    # ── webrtc_streamer at top level (NOT inside a column) ────────────────────
-    rtc_config = RTCConfiguration(_get_rtc_configuration())
-
-    ctx = webrtc_streamer(
-        key="visionmate-live",
-        mode=WebRtcMode.SENDRECV,
-        rtc_configuration=rtc_config,
-        video_transformer_factory=VisionMateTransformer,
-        media_stream_constraints={
-            "video": {"width": {"ideal": 480}, "height": {"ideal": 360}},
-            "audio": False,
-        },
-        async_processing=True,
-    )
-
-    # ── Inject models using update_models() — works even after connection ──────
-    # This is called on EVERY Streamlit rerun, so the transformer always has
-    # the latest model objects inside its lock-protected state.
-    if ctx.video_transformer:
-        ctx.video_transformer.update_models(
-            face_lm, pose_lm,
-            eye_model, eye_model_name,
-            posture_model, posture_model_name,
-        )
-
-    # ── Two-column row below the feed: timer left, analysis right ─────────────
+    # Native side-by-side layout: video on the left (60%), analysis on the right (40%)
     feed_col, analysis_col = st.columns([3, 2])
 
     with feed_col:
+        rtc_config = RTCConfiguration(_get_rtc_configuration())
+
+        ctx = webrtc_streamer(
+            key="visionmate-live",
+            mode=WebRtcMode.SENDRECV,
+            rtc_configuration=rtc_config,
+            video_transformer_factory=VisionMateTransformer,
+            media_stream_constraints={
+                "video": {"width": {"ideal": 640}, "height": {"ideal": 480}},
+                "audio": False,
+            },
+            async_processing=True,
+        )
+
+        if ctx.video_transformer:
+            ctx.video_transformer.update_models(
+                face_lm, pose_lm,
+                eye_model, eye_model_name,
+                posture_model, posture_model_name,
+            )
+
         if "session_start" in st.session_state:
             elapsed    = int(time.time() - st.session_state["session_start"])
             mins, secs = divmod(elapsed, 60)
@@ -242,11 +205,12 @@ def render_monitoring_tab(
             st.caption(f"Session duration: {timer_str}")
 
     with analysis_col:
-        result = ctx.video_transformer.get_result() if ctx.video_transformer else FrameResult()
+        result = ctx.video_transformer.get_result() if ctx and ctx.video_transformer else FrameResult()
         _render_metrics_panel(result, eye_model_name, posture_model_name)
 
-        voice_guidance.update_condition("eye_strain", result.eye_status     == "Strained")
-        voice_guidance.update_condition("slouching",  result.posture_status == "Slouching")
+        voice_guidance.update_condition("eye_strain", result.eye_status == "Strained")
+        voice_guidance.update_condition("slouching", result.posture_status == "Slouching")
+        
         if "session_start" in st.session_state:
             session_mins = (time.time() - st.session_state["session_start"]) / 60.0
             voice_guidance.update_condition("break_reminder", session_mins > 20)
